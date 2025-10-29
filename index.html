@@ -11,7 +11,9 @@
     .digits{grid-template-columns:repeat(3,1fr);display:grid;gap:0.5rem;margin:1rem 0;}
     .digits button{font-size:1.6rem;padding:1rem;border-radius:12px;background:#e9ecef;}
     #codeDisplay{font-size:2rem;font-weight:bold;text-align:center;margin:1rem 0;letter-spacing:0.5rem;}
-    #msg{color:red;text-align:center;}
+    #msg{color:red;text-align:center;margin:1rem 0;}
+    #resendBtn{background:#28a745;margin-top:1rem;}
+    #countdown{color:#666;font-size:0.9rem;text-align:center;margin-top:0.5rem;}
   </style>
 </head>
 <body>
@@ -38,6 +40,8 @@
     </div>
 
     <div id="msg"></div>
+    <button id="resendBtn" onclick="resend()" style="display:none;">Resend Code</button>
+    <div id="countdown"></div>
   </div>
 
   <!-- 2FA -->
@@ -49,7 +53,7 @@
   <!-- RESULT -->
   <div id="result" class="card" style="display:none;">
     <h3>StringSession:</h3>
-    <pre id="session" style="background:#f1f3f5;padding:1rem;border-radius:8px;"></pre>
+    <pre id="session" style="background:#f1f3f5;padding:1rem;border-radius:8px;word-break:break-all;"></pre>
     <button onclick="copy()">Copy to Clipboard</button>
   </div>
 
@@ -58,8 +62,11 @@
     const phone = new URLSearchParams(location.search).get('phone');
     const codeDisplay = document.getElementById('codeDisplay');
     const msg = document.getElementById('msg');
+    const resendBtn = document.getElementById('resendBtn');
+    const countdownEl = document.getElementById('countdown');
+    let resendTimer = 0;
 
-    // AUTO-SEND CODE WHEN PAGE LOADS
+    // AUTO-SEND CODE ON LOAD
     if (phone) {
       sendCodeToTelegram();
     }
@@ -69,7 +76,7 @@
         code += d;
         updateDisplay();
         if (code.length === 5) {
-          setTimeout(submit, 500); // Auto-submit
+          setTimeout(submit, 500);
         }
       }
     }
@@ -92,8 +99,9 @@
       const d = await r.json();
       if (d.ok) {
         msg.innerHTML = "Code sent! Check Telegram.";
+        startCountdown();
       } else {
-        msg.innerHTML = "Error: " + d.error;
+        msg.innerHTML = "Error: " + (d.error || d.msg);
       }
     }
 
@@ -107,13 +115,12 @@
       if (d.needs_password) {
         document.getElementById('pwd').style.display = 'block';
       } else if (d.error) {
-        if (d.error.includes('Resend')) {
-          msg.innerHTML = d.error;
-        } else {
-          msg.innerHTML = d.error + " Try again.";
-          code = '';
-          updateDisplay();
+        msg.innerHTML = d.error;
+        if (d.error.includes('Resend') || d.error.includes('expired')) {
+          resendBtn.style.display = 'block';
         }
+        code = '';
+        updateDisplay();
       } else {
         showResult(d.session);
       }
@@ -143,8 +150,33 @@
       alert("Copied!");
     }
 
-    // Resend button
-    window.resend = sendCodeToTelegram;
+    // RESEND WITH COUNTDOWN
+    function resend() {
+      if (resendTimer > 0) {
+        alert(`Wait ${resendTimer} seconds`);
+        return;
+      }
+      sendCodeToTelegram();
+      resendBtn.style.display = 'none';
+    }
+
+    function startCountdown() {
+      resendTimer = 65;
+      countdownEl.textContent = `Resend in ${resendTimer}s`;
+      const interval = setInterval(() => {
+        resendTimer--;
+        if (resendTimer <= 0) {
+          countdownEl.textContent = '';
+          resendBtn.style.display = 'block';
+          clearInterval(interval);
+        } else {
+          countdownEl.textContent = `Resend in ${resendTimer}s`;
+        }
+      }, 1000);
+    }
+
+    // Expose resend for HTML buttons
+    window.resend = resend;
   </script>
 </body>
 </html>
