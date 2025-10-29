@@ -1,12 +1,18 @@
 import os
 import sqlite3
+import asyncio
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
+from telethon.errors import (
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    FloodWaitError
+)
 
 app = FastAPI()
 templates = Jinja2Templates(directory=".")
@@ -16,7 +22,6 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 
 DB = "sessions.db"
-EXPIRY_MINUTES = 30  # Code valid for 30 min
 
 # === DATABASE ===
 def init():
@@ -68,7 +73,6 @@ def clear_attempts(phone):
     conn.commit()
     conn.close()
 
-# === CODE HASH WITH EXPIRY ===
 def save_code_hash(phone, code_hash):
     conn = sqlite3.connect(DB)
     conn.execute("REPLACE INTO code_hashes (phone, hash, time) VALUES (?, ?, ?)",
@@ -79,17 +83,10 @@ def save_code_hash(phone, code_hash):
 def get_code_hash(phone):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT hash, time FROM code_hashes WHERE phone = ?", (phone,))
+    c.execute("SELECT hash FROM code_hashes WHERE phone = ?", (phone,))
     row = c.fetchone()
     conn.close()
-    if not row:
-        return None
-    hash_val, time_str = row
-    saved_time = datetime.fromisoformat(time_str)
-    if datetime.utcnow() - saved_time > timedelta(minutes=EXPIRY_MINUTES):
-        delete_code_hash(phone)
-        return None
-    return hash_val
+    return row[0] if row else None
 
 def delete_code_hash(phone):
     conn = sqlite3.connect(DB)
@@ -97,21 +94,20 @@ def delete_code_hash(phone):
     conn.commit()
     conn.close()
 
-# === AUTO-RESEND ON EXPIRED ===
-async def ensure_code_sent(phone):
-    code_hash = get_code_hash(phone)
-    if not code_hash:
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        try:
-            await client.connect()
-            sent = await client.send_code_request(phone)
-            save_code_hash(phone, sent.phone_code_hash)
-            await client.disconnect()
-            clear_attempts(phone)
-            return True, "New code sent!"
-        except Exception as e:
-            return False, str(e)
-    return True, "Code still valid."
+# === FORCE FRESH CODE ===
+async def send_fresh_code(phone):
+    delete_code_hash(phone)  # ← CRITICAL: Remove old hash
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    try:
+        await client.connect()
+        sent = await client.send_code_request(phone, force_sms=False)
+        save_code_hash(phone, sent.phone_code_hash)
+        await client.disconnect()
+        clear_attempts(phone)
+        return True, "New code sent!"
+    except Exception as e:
+        await client.disconnect()
+        return False, str(e)
 
 # === ROUTES ===
 @app.get("/", response_class=HTMLResponse)
@@ -123,17 +119,8 @@ async def home(request: Request):
 async def send_code(phone: str = Form(...)):
     if phone_exists(phone):
         return JSONResponse({"error": "You already have a session. Contact admin."})
-    
-    client = TelegramClient(StringSession(), API_ID, API_HASH)
-    try:
-        await client.connect()
-        sent = await client.send_code_request(phone)
-        save_code_hash(phone, sent.phone_code_hash)
-        await client.disconnect()
-        clear_attempts(phone)
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        return JSONResponse({"error": str(e)})
+    success, msg = await send_fresh_code(phone)
+    return JSONResponse({"ok": success, "msg": msg} if success else {"error": msg})
 
 @app.post("/code")
 async def verify_code(phone: str = Form(...), code: str = Form(...)):
@@ -144,10 +131,9 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
     if attempts > 3:
         return JSONResponse({"error": "Too many attempts. <button onclick=\"resend()\">Resend Code</button>"})
 
-    # Auto-resend if expired
     code_hash = get_code_hash(phone)
     if not code_hash:
-        success, msg = await ensure_code_sent(phone)
+        success, msg = await send_fresh_code(phone)
         if not success:
             return JSONResponse({"error": msg})
         code_hash = get_code_hash(phone)
@@ -160,14 +146,14 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
         await client.disconnect()
         save_session(phone, session_str)
         return JSONResponse({"session": session_str})
-    except SessionPasswordNeededError:
-        return JSONResponse({"needs_password": True})
+    except PhoneCodeExpiredError:
+        success, msg = await send_fresh_code(phone)
+        return JSONResponse({"error": f"Code expired. {msg} <button onclick=\"resend()\">Try Again</button>"})
     except PhoneCodeInvalidError:
         return JSONResponse({"error": f"Wrong code. Attempt {attempts}/3"})
+    except SessionPasswordNeededError:
+        return JSONResponse({"needs_password": True})
     except Exception as e:
-        if "expired" in str(e).lower():
-            success, msg = await ensure_code_sent(phone)
-            return JSONResponse({"error": f"Code expired. {msg} <button onclick=\"resend()\">Try Again</button>"})
         return JSONResponse({"error": str(e)})
     finally:
         if client.is_connected():
