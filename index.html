@@ -14,6 +14,7 @@
     #msg{text-align:center;margin:1.2rem 0;font-weight:bold;min-height:1.5rem;}
     .success{color:#0f9d58;}
     .error{color:#d93025;}
+    button.resend{width:100%;padding:0.8rem;background:#ff9800;color:white;border:none;border-radius:10px;font-weight:bold;margin-top:0.5rem;}
     input[type="password"]{width:100%;padding:0.9rem;margin:0.5rem 0;border:1px solid #ddd;border-radius:10px;font-size:1rem;}
     button.submit{width:100%;padding:0.9rem;background:#1a73e8;color:white;border:none;border-radius:10px;font-weight:bold;font-size:1.1rem;margin-top:0.5rem;}
     #result textarea{width:100%;height:130px;font-family:'Courier New',monospace;font-size:0.85rem;padding:0.8rem;border:1px solid #ddd;border-radius:10px;resize:none;background:#f8f9fa;margin:0.5rem 0;}
@@ -33,6 +34,7 @@
       <button onclick="add('0')">0</button><button onclick="back()">Backspace</button>
     </div>
     <div id="msg"></div>
+    <button class="resend" id="resend" onclick="resendCode()" style="display:none;">Resend Code</button>
   </div>
 
   <div id="pwd" class="card" style="display:none;">
@@ -49,11 +51,28 @@
 
   <script>
     let code = '';
+    let hash = '';
     const phone = new URLSearchParams(location.search).get('phone');
     const msg = document.getElementById('msg');
+    const resendBtn = document.getElementById('resend');
+    const storageKey = 'tg_session_' + phone;
 
-    // AUTO SEND CODE ON PAGE LOAD
-    if (phone) {
+    // CHECK IF CODE ALREADY SENT
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      const data = JSON.parse(saved);
+      hash = data.hash;
+      msg.innerHTML = "Code already sent. Check Telegram.";
+      msg.className = "success";
+      resendBtn.style.display = 'block';
+    } else if (phone) {
+      sendCode();
+    } else {
+      msg.innerHTML = "No phone number.";
+      msg.className = "error";
+    }
+
+    function sendCode() {
       msg.innerHTML = "Sending code...";
       msg.className = "";
       fetch('/send', {
@@ -64,20 +83,27 @@
       .then(r => r.json())
       .then(d => {
         if (d.ok) {
+          hash = d.hash;
+          localStorage.setItem(storageKey, JSON.stringify({ hash }));
           msg.innerHTML = "Code sent! Check Telegram.";
           msg.className = "success";
+          resendBtn.style.display = 'block';
         } else {
-          msg.innerHTML = d.error || "Failed to send code.";
+          msg.innerHTML = d.error;
           msg.className = "error";
         }
       })
-      .catch(err => {
-        msg.innerHTML = "Network error: " + err.message;
+      .catch(() => {
+        msg.innerHTML = "Network error.";
         msg.className = "error";
       });
-    } else {
-      msg.innerHTML = "No phone number provided.";
-      msg.className = "error";
+    }
+
+    function resendCode() {
+      localStorage.removeItem(storageKey);
+      hash = '';
+      resendBtn.style.display = 'none';
+      sendCode();
     }
 
     function add(d) {
@@ -94,8 +120,13 @@
     }
 
     async function verify() {
+      if (!hash) {
+        msg.innerHTML = "No code sent. Try resend.";
+        msg.className = "error";
+        return;
+      }
       const pwd = document.getElementById('pass')?.value || '';
-      const body = new URLSearchParams({ phone, code });
+      const body = new URLSearchParams({ phone, code, hash });
       if (pwd) body.append('pwd', pwd);
 
       msg.innerHTML = "Verifying...";
@@ -123,6 +154,7 @@
           document.getElementById('result').style.display = 'block';
           msg.innerHTML = "Success!";
           msg.className = "success";
+          localStorage.removeItem(storageKey);
         }
       } catch (e) {
         msg.innerHTML = "Connection failed.";
