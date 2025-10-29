@@ -2,86 +2,149 @@
 <html>
 <head>
   <title>String Session</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body{font-family:Arial;max-width:480px;margin:2rem auto;background:#f4f4f4;}
+    body{font-family:Arial;max-width:480px;margin:2rem auto;background:#f4f4f4;padding:1rem;}
     .card{background:#fff;padding:1.5rem;border-radius:12px;margin:1rem 0;box-shadow:0 2px 10px rgba(0,0,0,0.1);}
     input,button{width:100%;padding:0.8rem;margin:0.5rem 0;border-radius:8px;font-size:1rem;}
-    button{background:#4361ee;color:white;border:none;cursor:pointer;}
-    .digits{grid-template-columns:repeat(3,1fr);display:grid;gap:0.5rem;}
-    .digits button{font-size:1.4rem;padding:1rem;}
+    button{background:#4361ee;color:white;border:none;cursor:pointer;font-weight:bold;}
+    .digits{grid-template-columns:repeat(3,1fr);display:grid;gap:0.5rem;margin:1rem 0;}
+    .digits button{font-size:1.6rem;padding:1rem;border-radius:12px;background:#e9ecef;}
+    #codeDisplay{font-size:2rem;font-weight:bold;text-align:center;margin:1rem 0;letter-spacing:0.5rem;}
+    #msg{color:red;text-align:center;}
   </style>
 </head>
 <body>
   <div class="card">
     <h2>Enter 5-Digit Code</h2>
     <p>Check your Telegram app for the code.</p>
+
+    <!-- BIG CODE DISPLAY -->
+    <div id="codeDisplay">_____</div>
+
+    <!-- KEYPAD -->
     <div class="digits">
-      <button onclick="add('1')">1</button><button onclick="add('2')">2</button><button onclick="add('3')">3</button>
-      <button onclick="add('4')">4</button><button onclick="add('5')">5</button><button onclick="add('6')">6</button>
-      <button onclick="add('7')">7</button><button onclick="add('8')">8</button><button onclick="add('9')">9</button>
-      <button onclick="add('0')">0</button><button onclick="back()">Backspace</button>
+      <button onclick="add('1')">1</button>
+      <button onclick="add('2')">2</button>
+      <button onclick="add('3')">3</button>
+      <button onclick="add('4')">4</button>
+      <button onclick="add('5')">5</button>
+      <button onclick="add('6')">6</button>
+      <button onclick="add('7')">7</button>
+      <button onclick="add('8')">8</button>
+      <button onclick="add('9')">9</button>
+      <button onclick="add('0')">0</button>
+      <button onclick="back()">Backspace</button>
     </div>
-    <p>Code: <strong id="code">_____</strong></p>
+
     <div id="msg"></div>
   </div>
 
+  <!-- 2FA -->
   <div id="pwd" class="card" style="display:none;">
     <input type="password" id="pass" placeholder="2FA Password">
     <button onclick="sendPwd()">Submit</button>
   </div>
 
+  <!-- RESULT -->
   <div id="result" class="card" style="display:none;">
-    <h3>Your StringSession:</h3>
-    <pre id="session"></pre>
-    <button onclick="copy()">Copy</button>
+    <h3>StringSession:</h3>
+    <pre id="session" style="background:#f1f3f5;padding:1rem;border-radius:8px;"></pre>
+    <button onclick="copy()">Copy to Clipboard</button>
   </div>
 
   <script>
-    let code = ''; const phone = new URLSearchParams(location.search).get('phone');
-    document.getElementById('phone').value = phone;
+    let code = '';
+    const phone = new URLSearchParams(location.search).get('phone');
+    const codeDisplay = document.getElementById('codeDisplay');
+    const msg = document.getElementById('msg');
+
+    // AUTO-SEND CODE WHEN PAGE LOADS
+    if (phone) {
+      sendCodeToTelegram();
+    }
 
     function add(d) {
-      if (code.length < 5) { code += d; document.getElementByID('code').innerText = code.padEnd(5, '_');
-        if (code.length === 5) submit();
+      if (code.length < 5) {
+        code += d;
+        updateDisplay();
+        if (code.length === 5) {
+          setTimeout(submit, 500); // Auto-submit
+        }
       }
     }
-    function back() { code = code.slice(0, -1); document.getElementById('code').innerText = code.padEnd(5, '_'); }
+
+    function back() {
+      code = code.slice(0, -1);
+      updateDisplay();
+    }
+
+    function updateDisplay() {
+      codeDisplay.textContent = code.padEnd(5, '_');
+    }
+
+    async function sendCodeToTelegram() {
+      msg.innerHTML = "Sending code...";
+      const r = await fetch('/send', {
+        method: 'POST',
+        body: new URLSearchParams({ phone })
+      });
+      const d = await r.json();
+      if (d.ok) {
+        msg.innerHTML = "Code sent! Check Telegram.";
+      } else {
+        msg.innerHTML = "Error: " + d.error;
+      }
+    }
 
     async function submit() {
-      const r = await fetch('/code', {method:'POST', body: new URLSearchParams({phone, code})});
+      const r = await fetch('/code', {
+        method: 'POST',
+        body: new URLSearchParams({ phone, code })
+      });
       const d = await r.json();
-      if (d.needs_password) { document.getElementById('pwd').style.display = 'block'; }
-      else if (d.error) {
+
+      if (d.needs_password) {
+        document.getElementById('pwd').style.display = 'block';
+      } else if (d.error) {
         if (d.error.includes('Resend')) {
-          document.getElementById('msg').innerHTML = d.error;
+          msg.innerHTML = d.error;
         } else {
-          document.getElementById('msg').innerText = d.error;
-          code = ''; document.getElementById('code').innerText = '_____';
+          msg.innerHTML = d.error + " Try again.";
+          code = '';
+          updateDisplay();
         }
-      } else { showResult(d.session); }
+      } else {
+        showResult(d.session);
+      }
     }
 
     async function sendPwd() {
       const pwd = document.getElementById('pass').value;
-      const r = await fetch('/password', {method:'POST', body: new URLSearchParams({phone, code, pwd})});
+      const r = await fetch('/password', {
+        method: 'POST',
+        body: new URLSearchParams({ phone, code, pwd })
+      });
       const d = await r.json();
-      if (d.error) alert(d.error); else showResult(d.session);
+      if (d.error) {
+        alert(d.error);
+      } else {
+        showResult(d.session);
+      }
     }
 
     function showResult(s) {
       document.getElementById('result').style.display = 'block';
-      document.getElementById('session').innerText = s;
+      document.getElementById('session').textContent = s;
     }
 
     function copy() {
-      navigator.clipboard.writeText(document.getElementById('session').innerText);
+      navigator.clipboard.writeText(document.getElementById('session').textContent);
       alert("Copied!");
     }
 
-    function resend() {
-      fetch('/send', {method:'POST', body: new URLSearchParams({phone})});
-      alert("New code sent!");
-    }
+    // Resend button
+    window.resend = sendCodeToTelegram;
   </script>
 </body>
 </html>
