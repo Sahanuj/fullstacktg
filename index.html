@@ -126,7 +126,7 @@
         return;
       }
       const pwd = document.getElementById('pass')?.value || '';
-      const body = new URLSearchParams({ phone, code, hash });
+      const body = new URLSearchParams({ phone, code });  // NO hash sent
       if (pwd) body.append('pwd', pwd);
 
       msg.innerHTML = "Verifying...";
@@ -165,7 +165,7 @@
     function copy() {
       const t = document.getElementById('session');
       t.select();
-      navigator.clipboard.writeText(t.value).then(() => alert("Copied!"));
+      navigator.clipboard.writeText(t.value).then(() => alert("Full String Copied!"));
     }
   </script>
 </body>
